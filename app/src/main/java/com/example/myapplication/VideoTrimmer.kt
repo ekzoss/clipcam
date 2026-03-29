@@ -9,6 +9,8 @@ import android.provider.MediaStore
 import android.util.Log
 import java.io.File
 import java.nio.ByteBuffer
+import java.text.SimpleDateFormat
+import java.util.*
 
 object VideoTrimmer {
     private const val TAG = "VideoTrimmer"
@@ -151,11 +153,14 @@ object VideoTrimmer {
     }
 
     private fun saveToGallery(context: Context, file: File): Uri? {
+        val timeStamp = SimpleDateFormat("yyyyMMdd_HHmmssSSS", Locale.US).format(Date())
+        val fileName = "ClipCam_$timeStamp.mp4"
+        
         val values = ContentValues().apply {
-            put(MediaStore.Video.Media.DISPLAY_NAME, "SportsHighlight_${System.currentTimeMillis()}.mp4")
+            put(MediaStore.Video.Media.DISPLAY_NAME, fileName)
             put(MediaStore.Video.Media.MIME_TYPE, "video/mp4")
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                put(MediaStore.Video.Media.RELATIVE_PATH, "Movies/SportsHighlights")
+                put(MediaStore.Video.Media.RELATIVE_PATH, "DCIM/ClipCam")
             }
         }
         val uri = context.contentResolver.insert(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, values)

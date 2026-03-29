@@ -7,6 +7,7 @@ import android.graphics.Color
 import android.hardware.SensorManager
 import android.os.*
 import android.util.Log
+import android.util.Range
 import android.util.TypedValue
 import android.view.*
 import android.widget.LinearLayout
@@ -15,6 +16,7 @@ import android.widget.TextView
 import android.widget.Toast
 import androidx.annotation.OptIn
 import androidx.appcompat.app.AppCompatActivity
+import androidx.camera.camera2.interop.Camera2Interop
 import androidx.camera.camera2.interop.ExperimentalCamera2Interop
 import androidx.camera.core.*
 import androidx.camera.lifecycle.ProcessCameraProvider
@@ -175,7 +177,7 @@ class MainActivity : AppCompatActivity() {
                 }
             }
             override fun onStopTrackingTouch(seekBar: SeekBar?) {
-                // Buffering remains stopped as requested to avoid crashes and allow safe duration adjustment
+                // Buffering remains stopped
             }
         })
         viewBinding.bufferSlider.progress = bufferDurationSec - 2
@@ -395,20 +397,32 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    @OptIn(ExperimentalCamera2Interop::class)
     private fun startCamera() {
         val cameraProviderFuture = ProcessCameraProvider.getInstance(this)
 
         cameraProviderFuture.addListener({
             cameraProvider = cameraProviderFuture.get()
 
-            val preview = Preview.Builder().build().also {
+            val previewBuilder = Preview.Builder()
+            Camera2Interop.Extender(previewBuilder).setCaptureRequestOption(
+                android.hardware.camera2.CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE,
+                Range(currentFps, currentFps)
+            )
+            val preview = previewBuilder.build().also {
                 it.setSurfaceProvider(viewBinding.viewFinder.surfaceProvider)
             }
 
             val recorder = Recorder.Builder()
                 .setQualitySelector(QualitySelector.from(currentQuality))
                 .build()
-            videoCapture = VideoCapture.withOutput(recorder)
+            
+            val videoCaptureBuilder = VideoCapture.Builder(recorder)
+            Camera2Interop.Extender(videoCaptureBuilder).setCaptureRequestOption(
+                android.hardware.camera2.CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE,
+                Range(currentFps, currentFps)
+            )
+            videoCapture = videoCaptureBuilder.build()
 
             val cameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
 
