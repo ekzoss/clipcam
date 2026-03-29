@@ -10,6 +10,7 @@ import android.util.Log
 import android.util.TypedValue
 import android.view.*
 import android.widget.LinearLayout
+import android.widget.SeekBar
 import android.widget.TextView
 import android.widget.Toast
 import androidx.annotation.OptIn
@@ -20,12 +21,12 @@ import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.video.*
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
-import androidx.core.view.get
 import com.example.myapplication.databinding.ActivityMainBinding
 import java.io.File
 import java.util.*
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 
 class MainActivity : AppCompatActivity() {
     private lateinit var viewBinding: ActivityMainBinding
@@ -38,7 +39,7 @@ class MainActivity : AppCompatActivity() {
 
     private var currentQuality = Quality.FHD
     private var currentFps = 60
-    private var bufferDurationSec = 10 
+    private var bufferDurationSec = 6
     
     private var currentSegmentStartTime: Long = 0
     private var bufferStartTimeTotal: Long = 0
@@ -53,7 +54,7 @@ class MainActivity : AppCompatActivity() {
             if (isBufferingEnabled) {
                 val elapsedSinceBufferStart = (System.currentTimeMillis() - bufferStartTimeTotal) / 1000
                 val displaySeconds = minOf(elapsedSinceBufferStart, bufferDurationSec.toLong())
-                viewBinding.textBufferTime.text = "${displaySeconds}s"
+                viewBinding.textBufferTime.text = String.format(Locale.US, "%ds", displaySeconds)
                 handler.postDelayed(this, 500)
             }
         }
@@ -69,6 +70,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private var currentZoomRatio = 1.0f
+    private var isSyncingRuler = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -88,6 +90,7 @@ class MainActivity : AppCompatActivity() {
 
         setupControls()
         setupZoom()
+        setupTapToFocus()
         setupSettingsPanel()
 
         cameraExecutor = Executors.newSingleThreadExecutor()
@@ -125,7 +128,6 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun updateUIForRotation(rotationDegrees: Float) {
-        // Find children of settings containers to rotate individually
         val viewsToRotate = mutableListOf<View>(
             viewBinding.btnSaveHighlight,
             viewBinding.textBufferTime,
@@ -134,24 +136,11 @@ class MainActivity : AppCompatActivity() {
             viewBinding.zoom05,
             viewBinding.zoom1,
             viewBinding.zoom2,
-            viewBinding.zoom5,
             viewBinding.textCurrentZoom
         )
         
-        // Also rotate all buttons inside settings panel
-        for (i in 0 until viewBinding.resolutionOptions.childCount) {
-            viewsToRotate.add(viewBinding.resolutionOptions.get(i))
-        }
-        for (i in 0 until viewBinding.fpsOptions.childCount) {
-            viewsToRotate.add(viewBinding.fpsOptions.get(i))
-        }
-        for (i in 0 until viewBinding.bufferOptions.childCount) {
-            viewsToRotate.add(viewBinding.bufferOptions.get(i))
-        }
-
         viewsToRotate.forEach { it.animate().rotation(rotationDegrees).setDuration(300).start() }
         
-        // Update target rotation for the next segment
         videoCapture?.targetRotation = getDisplayRotationFromUiRotation(rotationDegrees)
     }
 
@@ -174,13 +163,30 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun setupSettingsPanel() {
+        viewBinding.bufferSlider.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
+                val duration = progress + 2
+                bufferDurationSec = duration
+                viewBinding.textBufferDuration.text = String.format(Locale.US, "%ds", duration)
+            }
+            override fun onStartTrackingTouch(seekBar: SeekBar?) {
+                if (isBufferingEnabled) {
+                    stopBuffering()
+                }
+            }
+            override fun onStopTrackingTouch(seekBar: SeekBar?) {
+                // Buffering remains stopped as requested to avoid crashes and allow safe duration adjustment
+            }
+        })
+        viewBinding.bufferSlider.progress = bufferDurationSec - 2
+        viewBinding.textBufferDuration.text = String.format(Locale.US, "%ds", bufferDurationSec)
+        
         updateSettingsPanelUI()
     }
 
     private fun updateSettingsPanelUI() {
         val resolutions = mapOf("UHD" to Quality.UHD, "FHD" to Quality.FHD, "HD" to Quality.HD, "SD" to Quality.SD, "AUTO" to Quality.HIGHEST)
         val fpsList = listOf(60, 30)
-        val durations = listOf(5, 10, 15, 20, 30)
 
         viewBinding.resolutionOptions.removeAllViews()
         resolutions.forEach { (name, quality) ->
@@ -198,7 +204,7 @@ class MainActivity : AppCompatActivity() {
         viewBinding.fpsOptions.removeAllViews()
         fpsList.forEach { fps ->
             val isSelected = currentFps == fps
-            val btn = createSettingsButton("${fps}FPS", isSelected)
+            val btn = createSettingsButton(String.format(Locale.US, "%dFPS", fps), isSelected)
             btn.setOnClickListener {
                 currentFps = fps
                 updateSettingsPanelUI()
@@ -207,24 +213,6 @@ class MainActivity : AppCompatActivity() {
             }
             viewBinding.fpsOptions.addView(btn)
         }
-
-        viewBinding.bufferOptions.removeAllViews()
-        durations.forEach { duration ->
-            val isSelected = bufferDurationSec == duration
-            val btn = createSettingsButton("${duration}s", isSelected)
-            btn.setOnClickListener {
-                bufferDurationSec = duration
-                updateSettingsPanelUI()
-                if (isBufferingEnabled) {
-                    stopBuffering()
-                    toggleBuffering()
-                }
-            }
-            viewBinding.bufferOptions.addView(btn)
-        }
-        
-        // Re-apply rotation to new buttons
-        updateUIForRotation(currentUiRotation)
     }
 
     private fun createSettingsButton(text: String, isSelected: Boolean): TextView {
@@ -253,45 +241,129 @@ class MainActivity : AppCompatActivity() {
             val params = LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT)
             params.setMargins(15, 0, 15, 0)
             tickContainer.layoutParams = params
-            val isMajor = i % 10 == 0 || i == 5
+            
             val zoomVal = i / 10.0f
-            if (isMajor) {
+            val isLabeled = i == 5 || i == 10 || i == 20 || i == 50
+            val isMajor = i % 5 == 0
+            
+            if (isLabeled) {
                 val tv = TextView(this).apply {
-                    text = if (zoomVal < 1.0f) ".5x" else "${zoomVal.toInt()}x"
+                    text = if (i == 5) ".5x" else String.format(Locale.US, "%dx", zoomVal.toInt())
                     setTextColor(Color.WHITE)
-                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f)
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 9f)
                 }
                 tickContainer.addView(tv)
             } else {
-                tickContainer.addView(View(this).apply { layoutParams = LinearLayout.LayoutParams(1, 30) })
+                tickContainer.addView(View(this).apply { layoutParams = LinearLayout.LayoutParams(1, 12) })
             }
+            
             tickContainer.addView(View(this).apply {
-                layoutParams = LinearLayout.LayoutParams(3, if (isMajor) 40 else 20)
+                layoutParams = LinearLayout.LayoutParams(3, if (isLabeled) 24 else if (isMajor) 16 else 10)
                 setBackgroundColor(Color.WHITE)
             })
             rulerContent.addView(tickContainer)
         }
 
         viewBinding.zoomRulerScroll.setOnScrollChangeListener { _, scrollX, _, _, _ ->
+            if (isSyncingRuler) return@setOnScrollChangeListener
             val totalScrollRange = rulerContent.width - viewBinding.zoomRulerScroll.width
             if (totalScrollRange > 0) {
                 val progress = (scrollX.toFloat() / totalScrollRange).coerceIn(0f, 1f)
                 val ratio = 0.5f + (progress * 4.5f)
-                updateZoomFromRuler(ratio)
+                performZoom(ratio)
                 resetHideRulerTimer()
             }
         }
 
-        val zoomButtons = listOf(viewBinding.zoom05, viewBinding.zoom1, viewBinding.zoom2, viewBinding.zoom5)
-        val zoomFactors = listOf(0.5f, 1.0f, 2.0f, 5.0f)
+        val touchSlop = ViewConfiguration.get(this).scaledTouchSlop
+        val zoomButtons = listOf(viewBinding.zoom05, viewBinding.zoom1, viewBinding.zoom2)
+        val zoomFactors = listOf(0.5f, 1.0f, 2.0f)
+        
         for (i in zoomButtons.indices) {
             val btn = zoomButtons[i]
             val factor = zoomFactors[i]
-            btn.setOnClickListener {
-                setZoomByRatio(factor)
-                syncRulerToRatio(factor)
+            
+            var startX = 0f
+            var isDragging = false
+            val longPressHandler = Handler(Looper.getMainLooper())
+            val longPressRunnable = Runnable {
+                if (viewBinding.zoomRulerContainer.visibility != View.VISIBLE) {
+                    isDragging = true 
+                    performZoom(factor)
+                    syncRulerToRatio(factor)
+                    showZoomRuler()
+                }
+            }
+
+            btn.setOnTouchListener { v, event ->
+                when (event.action) {
+                    MotionEvent.ACTION_DOWN -> {
+                        startX = event.rawX
+                        isDragging = false
+                        longPressHandler.postDelayed(longPressRunnable, ViewConfiguration.getLongPressTimeout().toLong())
+                        true
+                    }
+                    MotionEvent.ACTION_MOVE -> {
+                        val dx = event.rawX - startX
+                        if (!isDragging && Math.abs(dx) > touchSlop) {
+                            isDragging = true
+                            longPressHandler.removeCallbacks(longPressRunnable)
+                            if (viewBinding.zoomRulerContainer.visibility != View.VISIBLE) {
+                                performZoom(factor)
+                                syncRulerToRatio(factor)
+                                showZoomRuler()
+                            }
+                        }
+                        
+                        if (isDragging || viewBinding.zoomRulerContainer.visibility == View.VISIBLE) {
+                            val diffX = startX - event.rawX
+                            viewBinding.zoomRulerScroll.scrollBy(diffX.toInt(), 0)
+                            startX = event.rawX
+                        }
+                        true
+                    }
+                    MotionEvent.ACTION_UP -> {
+                        longPressHandler.removeCallbacks(longPressRunnable)
+                        if (!isDragging && viewBinding.zoomRulerContainer.visibility != View.VISIBLE) {
+                            performZoom(factor)
+                        }
+                        v.performClick()
+                        true
+                    }
+                    MotionEvent.ACTION_CANCEL -> {
+                        longPressHandler.removeCallbacks(longPressRunnable)
+                        true
+                    }
+                    else -> false
+                }
             }
         }
+    }
+
+    @SuppressLint("ClickableViewAccessibility")
+    private fun setupTapToFocus() {
+        viewBinding.viewFinder.setOnTouchListener { v, event ->
+            if (event.action == MotionEvent.ACTION_DOWN) {
+                val factory = viewBinding.viewFinder.meteringPointFactory
+                val point = factory.createPoint(event.x, event.y)
+                
+                val action = FocusMeteringAction.Builder(point, FocusMeteringAction.FLAG_AF or FocusMeteringAction.FLAG_AE or FocusMeteringAction.FLAG_AWB)
+                    .setAutoCancelDuration(3, TimeUnit.SECONDS)
+                    .build()
+                
+                camera?.cameraControl?.startFocusAndMetering(action)
+                v.performClick()
+                true
+            } else {
+                false
+            }
+        }
+    }
+
+    private fun showZoomRuler() {
+        viewBinding.zoomShortcuts.visibility = View.GONE
+        viewBinding.zoomRulerContainer.visibility = View.VISIBLE
+        resetHideRulerTimer()
     }
 
     private fun resetHideRulerTimer() {
@@ -299,28 +371,27 @@ class MainActivity : AppCompatActivity() {
         hideRulerHandler.postDelayed(hideRulerRunnable, 3000)
     }
 
-    private fun updateZoomFromRuler(ratio: Float) {
-        currentZoomRatio = ratio
-        camera?.cameraControl?.setZoomRatio(ratio)
-        viewBinding.textCurrentZoom.text = String.format("%.1fx", ratio)
-    }
-
-    private fun setZoomByRatio(ratio: Float) {
-        currentZoomRatio = ratio
-        camera?.cameraControl?.setZoomRatio(ratio)
-        viewBinding.textCurrentZoom.text = String.format("%.1fx", ratio)
+    private fun performZoom(ratio: Float) {
+        val minZoom = camera?.cameraInfo?.zoomState?.value?.minZoomRatio ?: 0.5f
+        val maxZoom = camera?.cameraInfo?.zoomState?.value?.maxZoomRatio ?: 10.0f
+        val clampedRatio = ratio.coerceIn(minZoom, maxZoom)
         
-        viewBinding.zoomShortcuts.visibility = View.GONE
-        viewBinding.zoomRulerContainer.visibility = View.VISIBLE
-        resetHideRulerTimer()
+        camera?.cameraControl?.setZoomRatio(clampedRatio)
+        currentZoomRatio = clampedRatio
+        viewBinding.textCurrentZoom.text = String.format(Locale.US, "%.1fx", clampedRatio)
     }
 
     private fun syncRulerToRatio(ratio: Float) {
         viewBinding.zoomRulerScroll.post {
             val totalScrollRange = viewBinding.zoomRulerContent.width - viewBinding.zoomRulerScroll.width
+            if (totalScrollRange <= 0) return@post
+            
             val progress = (ratio - 0.5f) / 4.5f
             val scrollX = (progress * totalScrollRange).toInt()
+            
+            isSyncingRuler = true
             viewBinding.zoomRulerScroll.scrollTo(scrollX, 0)
+            isSyncingRuler = false
         }
     }
 
@@ -345,10 +416,8 @@ class MainActivity : AppCompatActivity() {
                 cameraProvider?.unbindAll()
                 camera = cameraProvider?.bindToLifecycle(this, cameraSelector, preview, videoCapture)
                 
-                // Set initial zoom
                 camera?.cameraControl?.setZoomRatio(currentZoomRatio)
                 
-                // Initialize target rotation
                 videoCapture?.targetRotation = getDisplayRotationFromUiRotation(currentUiRotation)
 
             } catch(exc: Exception) {
@@ -371,6 +440,8 @@ class MainActivity : AppCompatActivity() {
     private fun startBuffering() {
         val videoCapture = this.videoCapture ?: return
         if (!isBufferingEnabled) return
+        
+        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         
         val segmentFile = File(cacheDir, "segment_${System.currentTimeMillis()}.mp4")
         val fileOutputOptions = FileOutputOptions.Builder(segmentFile)
@@ -411,9 +482,11 @@ class MainActivity : AppCompatActivity() {
 
     private fun stopBuffering() {
         isBufferingEnabled = false
+        window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         recording?.stop()
         recording = null
         clearBufferCache()
+        cleanupBufferingUI()
     }
 
     private fun saveHighlight() {
@@ -426,8 +499,6 @@ class MainActivity : AppCompatActivity() {
 
     private fun processHighlight() {
         val filesToMerge = bufferSegments.toList()
-        // We do NOT pass a forced rotation here.
-        // Instead, we allow VideoTrimmer to extract and use the metadata already present in the source segments.
         VideoTrimmer.mergeAndTrim(this, filesToMerge, bufferDurationSec) { uri ->
             runOnUiThread {
                 if (uri != null) {

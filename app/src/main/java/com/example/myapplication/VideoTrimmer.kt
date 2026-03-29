@@ -27,7 +27,7 @@ object VideoTrimmer {
         val finalHighlight = File(context.cacheDir, "final_highlight_${System.currentTimeMillis()}.mp4")
         
         try {
-            // Extract orientation from the first source file. 
+            // Extract orientation from the first source file.
             // CameraX sets this correctly based on how the phone was held during recording.
             val retriever = MediaMetadataRetriever()
             retriever.setDataSource(files[0].absolutePath)
@@ -36,7 +36,7 @@ object VideoTrimmer {
             retriever.release()
 
             val muxer = MediaMuxer(finalHighlight.absolutePath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
-            
+
             // Set the orientation hint for the entire output file.
             muxer.setOrientationHint(rotation)
             
@@ -46,7 +46,7 @@ object VideoTrimmer {
             
             for (i in 0 until firstExtractor.trackCount) {
                 val format = firstExtractor.getTrackFormat(i)
-                
+
                 // CRITICAL: Strip track-level rotation to avoid "double-rotation".
                 // Since we've already set the orientation globally via muxer.setOrientationHint,
                 // keeping it in the track format would cause players to rotate it again.
@@ -55,7 +55,7 @@ object VideoTrimmer {
                 } else {
                     format.setInteger(MediaFormat.KEY_ROTATION, 0)
                 }
-                
+
                 trackMap[i] = muxer.addTrack(format)
             }
             firstExtractor.release()
