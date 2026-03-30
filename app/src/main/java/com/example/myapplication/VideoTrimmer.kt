@@ -29,8 +29,6 @@ object VideoTrimmer {
         val finalHighlight = File(context.cacheDir, "final_highlight_${System.currentTimeMillis()}.mp4")
         
         try {
-            // Extract orientation from the first source file.
-            // CameraX sets this correctly based on how the phone was held during recording.
             val retriever = MediaMetadataRetriever()
             retriever.setDataSource(files[0].absolutePath)
             val rotationStr = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_ROTATION)
@@ -38,20 +36,24 @@ object VideoTrimmer {
             retriever.release()
 
             val muxer = MediaMuxer(finalHighlight.absolutePath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
-
-            // Set the orientation hint for the entire output file.
             muxer.setOrientationHint(rotation)
             
             val trackMap = mutableMapOf<Int, Int>()
             val firstExtractor = MediaExtractor()
             firstExtractor.setDataSource(files[0].absolutePath)
             
+            var maxInputSize = 1024 * 1024 * 16 // Start with 16MB for 4K
+            
             for (i in 0 until firstExtractor.trackCount) {
                 val format = firstExtractor.getTrackFormat(i)
+                
+                // Ensure the format has a large enough buffer size defined
+                if (format.containsKey(MediaFormat.KEY_MAX_INPUT_SIZE)) {
+                    val size = format.getInteger(MediaFormat.KEY_MAX_INPUT_SIZE)
+                    if (size > maxInputSize) maxInputSize = size
+                }
+                format.setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, maxInputSize)
 
-                // CRITICAL: Strip track-level rotation to avoid "double-rotation".
-                // Since we've already set the orientation globally via muxer.setOrientationHint,
-                // keeping it in the track format would cause players to rotate it again.
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                     format.removeKey(MediaFormat.KEY_ROTATION)
                 } else {
@@ -60,10 +62,10 @@ object VideoTrimmer {
 
                 trackMap[i] = muxer.addTrack(format)
             }
+            
             firstExtractor.release()
             muxer.start()
 
-            // Calculate total duration to find trim point
             var totalDurationUs = 0L
             val fileDurations = mutableListOf<Long>()
             files.forEach { file ->
@@ -73,7 +75,9 @@ object VideoTrimmer {
                 for (i in 0 until ex.trackCount) {
                     val format = ex.getTrackFormat(i)
                     if (format.getString(MediaFormat.KEY_MIME)?.startsWith("video/") == true) {
-                        d = format.getLong(MediaFormat.KEY_DURATION)
+                        if (format.containsKey(MediaFormat.KEY_DURATION)) {
+                            d = format.getLong(MediaFormat.KEY_DURATION)
+                        }
                         break
                     }
                 }
@@ -84,7 +88,7 @@ object VideoTrimmer {
 
             val startTrimUs = (totalDurationUs - (targetDurationSec * 1_000_000L)).coerceAtLeast(0L)
             
-            val buffer = ByteBuffer.allocate(2 * 1024 * 1024)
+            val buffer = ByteBuffer.allocate(maxInputSize)
             val bufferInfo = MediaCodec.BufferInfo()
             var globalBaseOffsetUs = 0L
             var isFirstSampleWritten = false
@@ -111,7 +115,8 @@ object VideoTrimmer {
                     val absolutePts = globalBaseOffsetUs + rawPts
                     
                     if (absolutePts >= startTrimUs) {
-                        val isKeyframe = (extractor.sampleFlags and MediaExtractor.SAMPLE_FLAG_SYNC) != 0
+                        val sampleFlags = extractor.sampleFlags
+                        val isKeyframe = (sampleFlags and MediaExtractor.SAMPLE_FLAG_SYNC) != 0
                         
                         if (!isFirstSampleWritten) {
                             if (extractor.sampleTrackIndex == fileVideoTrack && isKeyframe) {
@@ -126,7 +131,19 @@ object VideoTrimmer {
                         bufferInfo.offset = 0
                         bufferInfo.size = sampleSize
                         bufferInfo.presentationTimeUs = absolutePts - firstPtsInFinalUs
-                        bufferInfo.flags = if (isKeyframe) MediaCodec.BUFFER_FLAG_KEY_FRAME else 0
+                        
+                        // Map flags safely for API 24+
+                        var flags = 0
+                        if ((sampleFlags and MediaExtractor.SAMPLE_FLAG_SYNC) != 0) {
+                            flags = flags or MediaCodec.BUFFER_FLAG_KEY_FRAME
+                        }
+                        // BUFFER_FLAG_PARTIAL_FRAME requires API 26
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                            if ((sampleFlags and MediaExtractor.SAMPLE_FLAG_PARTIAL_FRAME) != 0) {
+                                flags = flags or MediaCodec.BUFFER_FLAG_PARTIAL_FRAME
+                            }
+                        }
+                        bufferInfo.flags = flags
                         
                         val dstTrack = trackMap[extractor.sampleTrackIndex]
                         if (dstTrack != null) {

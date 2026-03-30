@@ -133,6 +133,7 @@ class MainActivity : AppCompatActivity() {
         val viewsToRotate = mutableListOf<View>(
             viewBinding.btnSaveHighlight,
             viewBinding.textBufferTime,
+            viewBinding.textBufferInactive,
             viewBinding.btnToggleBuffer,
             viewBinding.btnSettings,
             viewBinding.zoom05,
@@ -162,6 +163,7 @@ class MainActivity : AppCompatActivity() {
         viewBinding.btnSettings.setOnClickListener {
             viewBinding.settingsPanel.visibility = if (viewBinding.settingsPanel.visibility == View.VISIBLE) View.GONE else View.VISIBLE
         }
+        viewBinding.textBufferInactive.text = String.format(Locale.US, "%ds", bufferDurationSec)
     }
 
     private fun setupSettingsPanel() {
@@ -170,6 +172,7 @@ class MainActivity : AppCompatActivity() {
                 val duration = progress + 2
                 bufferDurationSec = duration
                 viewBinding.textBufferDuration.text = String.format(Locale.US, "%ds", duration)
+                viewBinding.textBufferInactive.text = String.format(Locale.US, "%ds", duration)
             }
             override fun onStartTrackingTouch(seekBar: SeekBar?) {
                 if (isBufferingEnabled) {
@@ -182,6 +185,7 @@ class MainActivity : AppCompatActivity() {
         })
         viewBinding.bufferSlider.progress = bufferDurationSec - 2
         viewBinding.textBufferDuration.text = String.format(Locale.US, "%ds", bufferDurationSec)
+        viewBinding.textBufferInactive.text = String.format(Locale.US, "%ds", bufferDurationSec)
         
         updateSettingsPanelUI()
     }
@@ -472,6 +476,7 @@ class MainActivity : AppCompatActivity() {
                         viewBinding.btnSaveHighlight.isEnabled = true
                         viewBinding.btnSaveHighlight.alpha = 1.0f
                         viewBinding.textBufferTime.visibility = View.VISIBLE
+                        viewBinding.textBufferInactive.visibility = View.GONE
                         currentSegmentStartTime = System.currentTimeMillis()
                         handler.post(bufferTimerRunnable)
                     }
@@ -513,7 +518,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun processHighlight() {
         val filesToMerge = bufferSegments.toList()
-        VideoTrimmer.mergeAndTrim(this, filesToMerge, bufferDurationSec) { uri ->
+        VideoTrimmer.mergeAndTrim(this, filesToMerge, bufferDurationSec + 1) { uri ->
             runOnUiThread {
                 if (uri != null) {
                     Toast.makeText(this, "Highlight Saved!", Toast.LENGTH_SHORT).show()
@@ -540,6 +545,7 @@ class MainActivity : AppCompatActivity() {
         viewBinding.btnSaveHighlight.isEnabled = false
         viewBinding.btnSaveHighlight.alpha = 0.3f
         viewBinding.textBufferTime.visibility = View.GONE
+        viewBinding.textBufferInactive.visibility = View.VISIBLE
         handler.removeCallbacks(bufferTimerRunnable)
     }
 
