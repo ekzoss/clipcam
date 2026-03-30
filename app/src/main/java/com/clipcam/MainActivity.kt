@@ -74,6 +74,8 @@ class MainActivity : AppCompatActivity() {
     private var currentZoomRatio = 1.0f
     private var isSyncingRuler = false
 
+    private var isManualFocusActive = false
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         viewBinding = ActivityMainBinding.inflate(layoutInflater)
@@ -139,7 +141,8 @@ class MainActivity : AppCompatActivity() {
             viewBinding.zoom05,
             viewBinding.zoom1,
             viewBinding.zoom2,
-            viewBinding.textCurrentZoom
+            viewBinding.textCurrentZoom,
+            viewBinding.focusRing
         )
         
         viewsToRotate.forEach { it.animate().rotation(rotationDegrees).setDuration(300).start() }
@@ -350,14 +353,30 @@ class MainActivity : AppCompatActivity() {
     private fun setupTapToFocus() {
         viewBinding.viewFinder.setOnTouchListener { v, event ->
             if (event.action == MotionEvent.ACTION_DOWN) {
-                val factory = viewBinding.viewFinder.meteringPointFactory
-                val point = factory.createPoint(event.x, event.y)
-                
-                val action = FocusMeteringAction.Builder(point, FocusMeteringAction.FLAG_AF or FocusMeteringAction.FLAG_AE or FocusMeteringAction.FLAG_AWB)
-                    .setAutoCancelDuration(3, TimeUnit.SECONDS)
-                    .build()
-                
-                camera?.cameraControl?.startFocusAndMetering(action)
+                if (isManualFocusActive) {
+                    // Release manual focus and return to auto
+                    camera?.cameraControl?.cancelFocusAndMetering()
+                    viewBinding.focusRing.visibility = View.GONE
+                    isManualFocusActive = false
+                } else {
+                    // Set manual focus and lock
+                    val factory = viewBinding.viewFinder.meteringPointFactory
+                    val point = factory.createPoint(event.x, event.y)
+                    
+                    val action = FocusMeteringAction.Builder(point, FocusMeteringAction.FLAG_AF or FocusMeteringAction.FLAG_AE or FocusMeteringAction.FLAG_AWB)
+                        .disableAutoCancel() // Keep it set permanently
+                        .build()
+                    
+                    camera?.cameraControl?.startFocusAndMetering(action)
+                    
+                    // Show focus ring
+                    viewBinding.focusRing.apply {
+                        visibility = View.VISIBLE
+                        x = event.x - (width / 2)
+                        y = event.y - (height / 2)
+                    }
+                    isManualFocusActive = true
+                }
                 v.performClick()
                 true
             } else {
@@ -438,6 +457,10 @@ class MainActivity : AppCompatActivity() {
                 
                 videoCapture?.targetRotation = getDisplayRotationFromUiRotation(currentUiRotation)
 
+                // If camera re-binds, reset manual focus state
+                isManualFocusActive = false
+                viewBinding.focusRing.visibility = View.GONE
+
             } catch(exc: Exception) {
                 Log.e("CameraX", "Use case binding failed", exc)
             }
@@ -455,6 +478,7 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    @SuppressLint("MissingPermission")
     private fun startBuffering() {
         val videoCapture = this.videoCapture ?: return
         if (!isBufferingEnabled) return
