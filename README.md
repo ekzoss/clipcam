@@ -1,5 +1,6 @@
 # ClipCam
 
+
 **ClipCam** is a high-performance Android camera application designed specifically for capturing sports highlights and "instant replay" moments. Instead of recording hours of footage, ClipCam maintains a continuous buffer, allowing you to save only the last few seconds of action *after* it happens.
 
 ## 🚀 Key Features
