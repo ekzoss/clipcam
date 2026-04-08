@@ -177,7 +177,7 @@ object VideoTrimmer {
             put(MediaStore.Video.Media.DISPLAY_NAME, fileName)
             put(MediaStore.Video.Media.MIME_TYPE, "video/mp4")
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                put(MediaStore.Video.Media.RELATIVE_PATH, "DCIM/ClipCam")
+                put(MediaStore.Video.Media.RELATIVE_PATH, "Movies/ClipCam")
             }
         }
         val uri = context.contentResolver.insert(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, values)
