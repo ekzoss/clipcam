@@ -84,16 +84,17 @@ class HighlightRecorder(
     private fun setupAudioEncoder() {
         try {
             val sampleRate = 44100
-            val channelConfig = AudioFormat.CHANNEL_IN_MONO
+            val channelConfig = AudioFormat.CHANNEL_IN_STEREO
             val audioFormatType = AudioFormat.ENCODING_PCM_16BIT
-            val bufferSize = AudioRecord.getMinBufferSize(sampleRate, channelConfig, audioFormatType)
+            val minBufferSize = AudioRecord.getMinBufferSize(sampleRate, channelConfig, audioFormatType)
             
-            audioRecord = AudioRecord(MediaRecorder.AudioSource.MIC, sampleRate, channelConfig, audioFormatType, bufferSize)
+            // Use CAMCORDER source which is optimized for video recording and typically uses the rear microphone
+            audioRecord = AudioRecord(MediaRecorder.AudioSource.CAMCORDER, sampleRate, channelConfig, audioFormatType, minBufferSize * 2)
             
-            val format = MediaFormat.createAudioFormat(MediaFormat.MIMETYPE_AUDIO_AAC, sampleRate, 1)
-            format.setInteger(MediaFormat.KEY_BIT_RATE, 128000)
+            val format = MediaFormat.createAudioFormat(MediaFormat.MIMETYPE_AUDIO_AAC, sampleRate, 2)
+            format.setInteger(MediaFormat.KEY_BIT_RATE, 192000)
             format.setInteger(MediaFormat.KEY_AAC_PROFILE, MediaCodecInfo.CodecProfileLevel.AACObjectLC)
-            format.setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, bufferSize * 2)
+            format.setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, minBufferSize * 4)
 
             audioEncoder = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_AUDIO_AAC)
             audioEncoder?.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
@@ -132,8 +133,8 @@ class HighlightRecorder(
 
     private fun recordAudio() {
         val sampleRate = 44100
-        val bufferSize = 4096
-        val bufferDurationUs = (bufferSize / 2) * 1_000_000L / sampleRate
+        val bufferSize = 8192 // Increased for stereo
+        val bufferDurationUs = (bufferSize / 4) * 1_000_000L / sampleRate // 4 bytes per frame (2 channels * 2 bytes)
         val buffer = ByteArray(bufferSize)
         
         while (isRunning.get()) {
