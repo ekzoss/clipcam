@@ -1,42 +1,33 @@
 # ClipCam
 
-
-**ClipCam** is a high-performance Android camera application designed specifically for capturing sports highlights and "instant replay" moments. Instead of recording hours of footage, ClipCam maintains a continuous buffer, allowing you to save only the last few seconds of action *after* it happens.
+**ClipCam** is a high-performance Android camera application designed specifically for capturing sports highlights and "instant replay" moments. Instead of recording hours of footage, ClipCam maintains a continuous in-memory buffer, allowing you to save only the last few seconds of action *after* it happens.
 
 ## 🚀 Key Features
 
-- **Continuous Buffering:** Keeps a sliding window of video (e.g., last 6-10 seconds) in memory/cache.
-- **One-Tap Highlight Save:** Press the "Save" button after a great play to permanently store that specific moment to your gallery.
+- **Continuous In-Memory Buffering:** Maintains a rolling window of encoded video and audio packets using `MediaCodec`, ensuring zero delay between back-to-back captures.
+- **One-Tap Highlight Save:** Tap the shutter to instantly mux the last few seconds of action to your gallery without stopping the live buffer.
 - **Pro Camera Controls:**
   - **Variable Frame Rates:** Support for 60FPS (smooth motion) and 30FPS.
-  - **High Resolution:** Toggle between SD, HD, FHD, and UHD (4K) depending on your device capabilities.
-  - **Precision Zoom:** Features a smooth scrollable ruler and quick-access shortcuts (0.5x, 1x, 2x).
+  - **High Resolution:** Toggle between SD, HD, FHD, and UHD (4K).
+  - **Precision Zoom:** Features a smooth scrollable ruler and quick-access shortcuts.
   - **Tap-to-Focus:** Manual focus and metering support.
-- **Smart UI:**
-  - **Orientation Locking:** UI elements rotate to match your grip while keeping the recording orientation stable.
-  - **Settings Panel:** On-the-fly adjustment of buffer duration and video quality.
+- **Advanced Audio Sync:** Configurable lag compensation in settings to ensure perfect audio-video alignment.
+- **High-Fidelity Audio:** Captures directional stereo sound optimized for video recording.
 
 ## 🛠 Tech Stack
 
 - **Language:** Kotlin
-- **Camera Engine:** [Jetpack CameraX](https://developer.android.com/jetpack/androidx/releases/camera) (utilizing Camera2Interop for advanced FPS control).
-- **Video Processing:** Custom segment merging and trimming logic for seamless highlight generation.
-- **Architecture:** ViewBinding for clean, type-safe UI interactions.
-
-## 📥 Installation
-
-Currently, ClipCam is in development. To use it:
-1. Clone this repository.
-2. Open the project in **Android Studio Koala** (or newer).
-3. Build and deploy to an Android device (Physical device recommended for CameraX features).
+- **Camera Engine:** Jetpack CameraX (with Camera2Interop for FPS control).
+- **Video Engine:** Custom `HighlightRecorder` using `MediaCodec` for hardware-accelerated encoding and `MediaMuxer` for instant file generation.
+- **Architecture:** Thread-safe concurrent buffering with dedicated background drainage.
 
 ## 🛡 Permissions
 
-ClipCam requires the following permissions to function:
+ClipCam requires:
 - `CAMERA`: To capture video.
-- `RECORD_AUDIO`: To include sound in your highlights.
-- `WRITE_EXTERNAL_STORAGE` (API 28 and below): To save videos to your gallery.
+- `RECORD_AUDIO`: To include high-quality stereo sound.
+- `WRITE_EXTERNAL_STORAGE` (API 28 and below): To save highlights to your gallery.
 
 ## 📝 License
 
-Distributed under the MIT License. See `LICENSE` for more information.
+Distributed under the MIT License.
