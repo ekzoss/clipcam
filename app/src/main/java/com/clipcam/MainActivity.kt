@@ -6,8 +6,11 @@ import android.content.pm.PackageManager
 import android.graphics.Color
 import android.hardware.SensorManager
 import android.os.*
+import android.text.Editable
+import android.text.TextWatcher
 import android.util.Log
 import android.util.Range
+import android.util.Size
 import android.util.TypedValue
 import android.view.*
 import android.widget.LinearLayout
@@ -19,36 +22,34 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.camera.camera2.interop.Camera2Interop
 import androidx.camera.camera2.interop.ExperimentalCamera2Interop
 import androidx.camera.core.*
+import androidx.camera.core.resolutionselector.ResolutionSelector
+import androidx.camera.core.resolutionselector.ResolutionStrategy
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.video.*
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import com.clipcam.databinding.ActivityMainBinding
-import java.io.File
 import java.util.*
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
-import java.util.concurrent.TimeUnit
 
 class MainActivity : AppCompatActivity() {
     private lateinit var viewBinding: ActivityMainBinding
 
-    private var videoCapture: VideoCapture<Recorder>? = null
-    private var recording: Recording? = null
     private var camera: Camera? = null
     private var cameraProvider: ProcessCameraProvider? = null
     private lateinit var cameraExecutor: ExecutorService
 
+    private var highlightRecorder: HighlightRecorder? = null
+
     private var currentQuality = Quality.FHD
     private var currentFps = 60
     private var bufferDurationSec = 6
+    private var audioLagMs = 250L
     
-    private var currentSegmentStartTime: Long = 0
     private var bufferStartTimeTotal: Long = 0
     private var isBufferingEnabled = false
     private var isSavingHighlightInProgress = false
-    
-    private val bufferSegments = LinkedList<File>()
     
     private val handler = Handler(Looper.getMainLooper())
     private val bufferTimerRunnable = object : Runnable {
@@ -85,13 +86,6 @@ class MainActivity : AppCompatActivity() {
         window.decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_LAYOUT_STABLE or View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
 
         setupOrientationListener()
-
-        if (allPermissionsGranted()) {
-            startCamera()
-        } else {
-            ActivityCompat.requestPermissions(this, REQUIRED_PERMISSIONS, 10)
-        }
-
         setupControls()
         setupZoom()
         setupTapToFocus()
@@ -123,12 +117,21 @@ class MainActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
         orientationEventListener.enable()
+        if (allPermissionsGranted()) {
+            startCamera()
+        } else {
+            ActivityCompat.requestPermissions(this, REQUIRED_PERMISSIONS, 10)
+        }
     }
 
     override fun onPause() {
         super.onPause()
         orientationEventListener.disable()
-        if (isBufferingEnabled) stopBuffering()
+        highlightRecorder?.stop()
+        highlightRecorder = null
+        cameraProvider?.unbindAll()
+        isBufferingEnabled = false
+        cleanupBufferingUI()
     }
 
     private fun updateUIForRotation(rotationDegrees: Float) {
@@ -146,18 +149,6 @@ class MainActivity : AppCompatActivity() {
         )
         
         viewsToRotate.forEach { it.animate().rotation(rotationDegrees).setDuration(300).start() }
-        
-        videoCapture?.targetRotation = getDisplayRotationFromUiRotation(rotationDegrees)
-    }
-
-    private fun getDisplayRotationFromUiRotation(uiRotation: Float): Int {
-        return when (uiRotation) {
-            0f -> Surface.ROTATION_0
-            90f -> Surface.ROTATION_90
-            180f -> Surface.ROTATION_180
-            270f -> Surface.ROTATION_270
-            else -> Surface.ROTATION_0
-        }
     }
 
     private fun setupControls() {
@@ -174,21 +165,27 @@ class MainActivity : AppCompatActivity() {
             override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
                 val duration = progress + 2
                 bufferDurationSec = duration
+                highlightRecorder?.updateBufferDuration(duration)
                 viewBinding.textBufferDuration.text = String.format(Locale.US, "%ds", duration)
                 viewBinding.textBufferInactive.text = String.format(Locale.US, "%ds", duration)
             }
-            override fun onStartTrackingTouch(seekBar: SeekBar?) {
-                if (isBufferingEnabled) {
-                    stopBuffering()
-                }
-            }
-            override fun onStopTrackingTouch(seekBar: SeekBar?) {
-                // Buffering remains stopped
-            }
+            override fun onStartTrackingTouch(seekBar: SeekBar?) {}
+            override fun onStopTrackingTouch(seekBar: SeekBar?) {}
         })
         viewBinding.bufferSlider.progress = bufferDurationSec - 2
         viewBinding.textBufferDuration.text = String.format(Locale.US, "%ds", bufferDurationSec)
         viewBinding.textBufferInactive.text = String.format(Locale.US, "%ds", bufferDurationSec)
+        
+        viewBinding.editAudioLag.setText(audioLagMs.toString())
+        viewBinding.editAudioLag.addTextChangedListener(object : TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
+            override fun afterTextChanged(s: Editable?) {
+                val value = s?.toString()?.toLongOrNull() ?: 0L
+                audioLagMs = value
+                highlightRecorder?.updateLagCompensation(value)
+            }
+        })
         
         updateSettingsPanelUI()
     }
@@ -204,7 +201,6 @@ class MainActivity : AppCompatActivity() {
             btn.setOnClickListener {
                 currentQuality = quality
                 updateSettingsPanelUI()
-                if (isBufferingEnabled) stopBuffering()
                 startCamera()
             }
             viewBinding.resolutionOptions.addView(btn)
@@ -217,7 +213,6 @@ class MainActivity : AppCompatActivity() {
             btn.setOnClickListener {
                 currentFps = fps
                 updateSettingsPanelUI()
-                if (isBufferingEnabled) stopBuffering()
                 startCamera()
             }
             viewBinding.fpsOptions.addView(btn)
@@ -354,22 +349,16 @@ class MainActivity : AppCompatActivity() {
         viewBinding.viewFinder.setOnTouchListener { v, event ->
             if (event.action == MotionEvent.ACTION_DOWN) {
                 if (isManualFocusActive) {
-                    // Release manual focus and return to auto
                     camera?.cameraControl?.cancelFocusAndMetering()
                     viewBinding.focusRing.visibility = View.GONE
                     isManualFocusActive = false
                 } else {
-                    // Set manual focus and lock
                     val factory = viewBinding.viewFinder.meteringPointFactory
                     val point = factory.createPoint(event.x, event.y)
-                    
                     val action = FocusMeteringAction.Builder(point, FocusMeteringAction.FLAG_AF or FocusMeteringAction.FLAG_AE or FocusMeteringAction.FLAG_AWB)
-                        .disableAutoCancel() // Keep it set permanently
+                        .disableAutoCancel()
                         .build()
-                    
                     camera?.cameraControl?.startFocusAndMetering(action)
-                    
-                    // Show focus ring
                     viewBinding.focusRing.apply {
                         visibility = View.VISIBLE
                         x = event.x - (width / 2)
@@ -400,7 +389,6 @@ class MainActivity : AppCompatActivity() {
         val minZoom = camera?.cameraInfo?.zoomState?.value?.minZoomRatio ?: 0.5f
         val maxZoom = camera?.cameraInfo?.zoomState?.value?.maxZoomRatio ?: 10.0f
         val clampedRatio = ratio.coerceIn(minZoom, maxZoom)
-        
         camera?.cameraControl?.setZoomRatio(clampedRatio)
         currentZoomRatio = clampedRatio
         viewBinding.textCurrentZoom.text = String.format(Locale.US, "%.1fx", clampedRatio)
@@ -410,10 +398,8 @@ class MainActivity : AppCompatActivity() {
         viewBinding.zoomRulerScroll.post {
             val totalScrollRange = viewBinding.zoomRulerContent.width - viewBinding.zoomRulerScroll.width
             if (totalScrollRange <= 0) return@post
-            
             val progress = (ratio - 0.5f) / 4.5f
             val scrollX = (progress * totalScrollRange).toInt()
-            
             isSyncingRuler = true
             viewBinding.zoomRulerScroll.scrollTo(scrollX, 0)
             isSyncingRuler = false
@@ -423,10 +409,9 @@ class MainActivity : AppCompatActivity() {
     @OptIn(ExperimentalCamera2Interop::class)
     private fun startCamera() {
         val cameraProviderFuture = ProcessCameraProvider.getInstance(this)
-
         cameraProviderFuture.addListener({
             cameraProvider = cameraProviderFuture.get()
-
+            val previewSize = getResolutionForQuality(currentQuality)
             val previewBuilder = Preview.Builder()
             Camera2Interop.Extender(previewBuilder).setCaptureRequestOption(
                 android.hardware.camera2.CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE,
@@ -436,135 +421,112 @@ class MainActivity : AppCompatActivity() {
                 it.setSurfaceProvider(viewBinding.viewFinder.surfaceProvider)
             }
 
-            val recorder = Recorder.Builder()
-                .setQualitySelector(QualitySelector.from(currentQuality))
+            highlightRecorder?.stop()
+            highlightRecorder = HighlightRecorder(
+                previewSize.width,
+                previewSize.height,
+                getBitrateForQuality(currentQuality),
+                currentFps,
+                bufferDurationSec,
+                audioLagMs
+            )
+            highlightRecorder?.start()
+
+            val recorderPreview = Preview.Builder()
+                .setResolutionSelector(
+                    ResolutionSelector.Builder()
+                        .setResolutionStrategy(
+                            ResolutionStrategy(previewSize, ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER)
+                        ).build()
+                )
                 .build()
             
-            val videoCaptureBuilder = VideoCapture.Builder(recorder)
-            Camera2Interop.Extender(videoCaptureBuilder).setCaptureRequestOption(
-                android.hardware.camera2.CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE,
-                Range(currentFps, currentFps)
-            )
-            videoCapture = videoCaptureBuilder.build()
-
-            val cameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
+            recorderPreview.setSurfaceProvider(cameraExecutor) { request ->
+                val surface = highlightRecorder?.inputSurface
+                if (surface != null) {
+                    request.provideSurface(surface, cameraExecutor) {}
+                } else {
+                    request.willNotProvideSurface()
+                }
+            }
 
             try {
                 cameraProvider?.unbindAll()
-                camera = cameraProvider?.bindToLifecycle(this, cameraSelector, preview, videoCapture)
-                
+                camera = cameraProvider?.bindToLifecycle(this, CameraSelector.DEFAULT_BACK_CAMERA, preview, recorderPreview)
                 camera?.cameraControl?.setZoomRatio(currentZoomRatio)
-                
-                videoCapture?.targetRotation = getDisplayRotationFromUiRotation(currentUiRotation)
-
-                // If camera re-binds, reset manual focus state
                 isManualFocusActive = false
                 viewBinding.focusRing.visibility = View.GONE
-
             } catch(exc: Exception) {
                 Log.e("CameraX", "Use case binding failed", exc)
             }
-
         }, ContextCompat.getMainExecutor(this))
+    }
+
+    private fun getResolutionForQuality(quality: Quality): Size {
+        return when (quality) {
+            Quality.UHD -> Size(3840, 2160)
+            Quality.FHD -> Size(1920, 1080)
+            Quality.HD -> Size(1280, 720)
+            Quality.SD -> Size(640, 480)
+            else -> Size(1920, 1080)
+        }
+    }
+
+    private fun getBitrateForQuality(quality: Quality): Int {
+        return when (quality) {
+            Quality.UHD -> 40_000_000
+            Quality.FHD -> 16_000_000
+            Quality.HD -> 8_000_000
+            Quality.SD -> 2_000_000
+            else -> 10_000_000
+        }
     }
 
     private fun toggleBuffering() {
         if (isBufferingEnabled) {
-            stopBuffering()
+            isBufferingEnabled = false
+            cleanupBufferingUI()
         } else {
             isBufferingEnabled = true
             bufferStartTimeTotal = System.currentTimeMillis()
-            startBuffering()
+            updateBufferingUI()
         }
     }
 
-    @SuppressLint("MissingPermission")
-    private fun startBuffering() {
-        val videoCapture = this.videoCapture ?: return
-        if (!isBufferingEnabled) return
-        
+    private fun updateBufferingUI() {
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-        
-        val segmentFile = File(cacheDir, "segment_${System.currentTimeMillis()}.mp4")
-        val fileOutputOptions = FileOutputOptions.Builder(segmentFile)
-            .setDurationLimitMillis(60 * 1000L) 
-            .build()
-
-        recording = videoCapture.output
-            .prepareRecording(this, fileOutputOptions)
-            .withAudioEnabled()
-            .start(ContextCompat.getMainExecutor(this)) { recordEvent ->
-                when(recordEvent) {
-                    is VideoRecordEvent.Start -> {
-                        viewBinding.btnToggleBuffer.setImageResource(R.drawable.ic_shutter_stop)
-                        viewBinding.btnSaveHighlight.isEnabled = true
-                        viewBinding.btnSaveHighlight.alpha = 1.0f
-                        viewBinding.textBufferTime.visibility = View.VISIBLE
-                        viewBinding.textBufferInactive.visibility = View.GONE
-                        currentSegmentStartTime = System.currentTimeMillis()
-                        handler.post(bufferTimerRunnable)
-                    }
-                    is VideoRecordEvent.Finalize -> {
-                        bufferSegments.add(segmentFile)
-                        if (bufferSegments.size > 3) {
-                            val oldest = bufferSegments.removeFirst()
-                            if (oldest.exists()) oldest.delete()
-                        }
-
-                        if (isSavingHighlightInProgress) {
-                            processHighlight()
-                        } else if (isBufferingEnabled) {
-                            startBuffering()
-                        } else {
-                            cleanupBufferingUI()
-                        }
-                    }
-                }
-            }
-    }
-
-    private fun stopBuffering() {
-        isBufferingEnabled = false
-        window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-        recording?.stop()
-        recording = null
-        clearBufferCache()
-        cleanupBufferingUI()
+        viewBinding.btnToggleBuffer.setImageResource(R.drawable.ic_shutter_stop)
+        viewBinding.btnSaveHighlight.isEnabled = true
+        viewBinding.btnSaveHighlight.alpha = 1.0f
+        viewBinding.textBufferTime.visibility = View.VISIBLE
+        viewBinding.textBufferInactive.visibility = View.GONE
+        handler.removeCallbacks(bufferTimerRunnable)
+        handler.post(bufferTimerRunnable)
     }
 
     private fun saveHighlight() {
-        if (recording != null && !isSavingHighlightInProgress) {
+        if (highlightRecorder != null && !isSavingHighlightInProgress) {
             isSavingHighlightInProgress = true
-            recording?.stop() 
-            Toast.makeText(this, "Capturing highlight...", Toast.LENGTH_SHORT).show()
-        }
-    }
+            
+            // Briefly change button color to blue for feedback
+            viewBinding.btnSaveHighlight.setColorFilter(Color.parseColor("#2196F3"))
+            handler.postDelayed({
+                viewBinding.btnSaveHighlight.clearColorFilter()
+            }, 300)
 
-    private fun processHighlight() {
-        val filesToMerge = bufferSegments.toList()
-        VideoTrimmer.mergeAndTrim(this, filesToMerge, bufferDurationSec + 1) { uri ->
-            runOnUiThread {
-                if (uri != null) {
-                    Toast.makeText(this, "Highlight Saved!", Toast.LENGTH_SHORT).show()
-                } else {
-                    Toast.makeText(this, "Save Failed", Toast.LENGTH_SHORT).show()
+            val sensorOrientation = camera?.cameraInfo?.sensorRotationDegrees ?: 90
+            val rotationHint = (sensorOrientation - currentUiRotation.toInt() + 360) % 360
+            
+            highlightRecorder?.saveHighlight(this, rotationHint) { _ ->
+                runOnUiThread {
+                    isSavingHighlightInProgress = false
                 }
-                
-                clearBufferCache()
-                bufferStartTimeTotal = System.currentTimeMillis()
-
-                isSavingHighlightInProgress = false
-                if (isBufferingEnabled) startBuffering()
             }
         }
     }
 
-    private fun clearBufferCache() {
-        bufferSegments.forEach { if (it.exists()) it.delete() }
-        bufferSegments.clear()
-    }
-
     private fun cleanupBufferingUI() {
+        window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         viewBinding.btnToggleBuffer.setImageResource(R.drawable.ic_shutter_buffer)
         viewBinding.btnSaveHighlight.isEnabled = false
         viewBinding.btnSaveHighlight.alpha = 0.3f
