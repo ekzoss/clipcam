@@ -16,7 +16,6 @@ import android.view.*
 import android.widget.LinearLayout
 import android.widget.SeekBar
 import android.widget.TextView
-import android.widget.Toast
 import androidx.annotation.OptIn
 import androidx.appcompat.app.AppCompatActivity
 import androidx.camera.camera2.interop.Camera2Interop
@@ -28,6 +27,8 @@ import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.video.*
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import androidx.core.graphics.toColorInt
+import androidx.core.view.isVisible
 import com.clipcam.databinding.ActivityMainBinding
 import java.util.*
 import java.util.concurrent.ExecutorService
@@ -68,8 +69,8 @@ class MainActivity : AppCompatActivity() {
 
     private val hideRulerHandler = Handler(Looper.getMainLooper())
     private val hideRulerRunnable = Runnable {
-        viewBinding.zoomRulerContainer.visibility = View.GONE
-        viewBinding.zoomShortcuts.visibility = View.VISIBLE
+        viewBinding.zoomRulerContainer.isVisible = false
+        viewBinding.zoomShortcuts.isVisible = true
     }
 
     private var currentZoomRatio = 1.0f
@@ -155,7 +156,7 @@ class MainActivity : AppCompatActivity() {
         viewBinding.btnToggleBuffer.setOnClickListener { toggleBuffering() }
         viewBinding.btnSaveHighlight.setOnClickListener { saveHighlight() }
         viewBinding.btnSettings.setOnClickListener {
-            viewBinding.settingsPanel.visibility = if (viewBinding.settingsPanel.visibility == View.VISIBLE) View.GONE else View.VISIBLE
+            viewBinding.settingsPanel.isVisible = !viewBinding.settingsPanel.isVisible
         }
         viewBinding.textBufferInactive.text = String.format(Locale.US, "%ds", bufferDurationSec)
     }
@@ -291,7 +292,7 @@ class MainActivity : AppCompatActivity() {
             var isDragging = false
             val longPressHandler = Handler(Looper.getMainLooper())
             val longPressRunnable = Runnable {
-                if (viewBinding.zoomRulerContainer.visibility != View.VISIBLE) {
+                if (!viewBinding.zoomRulerContainer.isVisible) {
                     isDragging = true 
                     performZoom(factor)
                     syncRulerToRatio(factor)
@@ -312,14 +313,14 @@ class MainActivity : AppCompatActivity() {
                         if (!isDragging && Math.abs(dx) > touchSlop) {
                             isDragging = true
                             longPressHandler.removeCallbacks(longPressRunnable)
-                            if (viewBinding.zoomRulerContainer.visibility != View.VISIBLE) {
+                            if (!viewBinding.zoomRulerContainer.isVisible) {
                                 performZoom(factor)
                                 syncRulerToRatio(factor)
                                 showZoomRuler()
                             }
                         }
                         
-                        if (isDragging || viewBinding.zoomRulerContainer.visibility == View.VISIBLE) {
+                        if (isDragging || viewBinding.zoomRulerContainer.isVisible) {
                             val diffX = startX - event.rawX
                             viewBinding.zoomRulerScroll.scrollBy(diffX.toInt(), 0)
                             startX = event.rawX
@@ -328,7 +329,7 @@ class MainActivity : AppCompatActivity() {
                     }
                     MotionEvent.ACTION_UP -> {
                         longPressHandler.removeCallbacks(longPressRunnable)
-                        if (!isDragging && viewBinding.zoomRulerContainer.visibility != View.VISIBLE) {
+                        if (!isDragging && !viewBinding.zoomRulerContainer.isVisible) {
                             performZoom(factor)
                         }
                         v.performClick()
@@ -350,7 +351,7 @@ class MainActivity : AppCompatActivity() {
             if (event.action == MotionEvent.ACTION_DOWN) {
                 if (isManualFocusActive) {
                     camera?.cameraControl?.cancelFocusAndMetering()
-                    viewBinding.focusRing.visibility = View.GONE
+                    viewBinding.focusRing.isVisible = false
                     isManualFocusActive = false
                 } else {
                     val factory = viewBinding.viewFinder.meteringPointFactory
@@ -360,7 +361,7 @@ class MainActivity : AppCompatActivity() {
                         .build()
                     camera?.cameraControl?.startFocusAndMetering(action)
                     viewBinding.focusRing.apply {
-                        visibility = View.VISIBLE
+                        isVisible = true
                         x = event.x - (width / 2)
                         y = event.y - (height / 2)
                     }
@@ -375,8 +376,8 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun showZoomRuler() {
-        viewBinding.zoomShortcuts.visibility = View.GONE
-        viewBinding.zoomRulerContainer.visibility = View.VISIBLE
+        viewBinding.zoomShortcuts.isVisible = false
+        viewBinding.zoomRulerContainer.isVisible = true
         resetHideRulerTimer()
     }
 
@@ -412,11 +413,28 @@ class MainActivity : AppCompatActivity() {
         cameraProviderFuture.addListener({
             cameraProvider = cameraProviderFuture.get()
             val previewSize = getResolutionForQuality(currentQuality)
+            
             val previewBuilder = Preview.Builder()
-            Camera2Interop.Extender(previewBuilder).setCaptureRequestOption(
+            val previewExtender = Camera2Interop.Extender(previewBuilder)
+            
+            // Set FPS range
+            previewExtender.setCaptureRequestOption(
                 android.hardware.camera2.CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE,
                 Range(currentFps, currentFps)
             )
+            
+            // Enable Video Stabilization (Digital)
+            previewExtender.setCaptureRequestOption(
+                android.hardware.camera2.CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE,
+                android.hardware.camera2.CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_ON
+            )
+            
+            // Enable Optical Stabilization (Hardware)
+            previewExtender.setCaptureRequestOption(
+                android.hardware.camera2.CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE,
+                android.hardware.camera2.CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_ON
+            )
+
             val preview = previewBuilder.build().also {
                 it.setSurfaceProvider(viewBinding.viewFinder.surfaceProvider)
             }
@@ -432,14 +450,31 @@ class MainActivity : AppCompatActivity() {
             )
             highlightRecorder?.start()
 
-            val recorderPreview = Preview.Builder()
+            val recorderPreviewBuilder = Preview.Builder()
                 .setResolutionSelector(
                     ResolutionSelector.Builder()
                         .setResolutionStrategy(
                             ResolutionStrategy(previewSize, ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER)
                         ).build()
                 )
-                .build()
+            
+            val recorderExtender = Camera2Interop.Extender(recorderPreviewBuilder)
+            
+            // Apply same stabilization and FPS settings to the recorder stream
+            recorderExtender.setCaptureRequestOption(
+                android.hardware.camera2.CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE,
+                Range(currentFps, currentFps)
+            )
+            recorderExtender.setCaptureRequestOption(
+                android.hardware.camera2.CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE,
+                android.hardware.camera2.CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_ON
+            )
+            recorderExtender.setCaptureRequestOption(
+                android.hardware.camera2.CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE,
+                android.hardware.camera2.CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_ON
+            )
+            
+            val recorderPreview = recorderPreviewBuilder.build()
             
             recorderPreview.setSurfaceProvider(cameraExecutor) { request ->
                 val surface = highlightRecorder?.inputSurface
@@ -455,7 +490,7 @@ class MainActivity : AppCompatActivity() {
                 camera = cameraProvider?.bindToLifecycle(this, CameraSelector.DEFAULT_BACK_CAMERA, preview, recorderPreview)
                 camera?.cameraControl?.setZoomRatio(currentZoomRatio)
                 isManualFocusActive = false
-                viewBinding.focusRing.visibility = View.GONE
+                viewBinding.focusRing.isVisible = false
             } catch(exc: Exception) {
                 Log.e("CameraX", "Use case binding failed", exc)
             }
@@ -498,8 +533,8 @@ class MainActivity : AppCompatActivity() {
         viewBinding.btnToggleBuffer.setImageResource(R.drawable.ic_shutter_stop)
         viewBinding.btnSaveHighlight.isEnabled = true
         viewBinding.btnSaveHighlight.alpha = 1.0f
-        viewBinding.textBufferTime.visibility = View.VISIBLE
-        viewBinding.textBufferInactive.visibility = View.GONE
+        viewBinding.textBufferTime.isVisible = true
+        viewBinding.textBufferInactive.isVisible = false
         handler.removeCallbacks(bufferTimerRunnable)
         handler.post(bufferTimerRunnable)
     }
@@ -509,7 +544,7 @@ class MainActivity : AppCompatActivity() {
             isSavingHighlightInProgress = true
             
             // Briefly change button color to blue for feedback
-            viewBinding.btnSaveHighlight.setColorFilter(Color.parseColor("#2196F3"))
+            viewBinding.btnSaveHighlight.setColorFilter("#2196F3".toColorInt())
             handler.postDelayed({
                 viewBinding.btnSaveHighlight.clearColorFilter()
             }, 300)
@@ -530,8 +565,8 @@ class MainActivity : AppCompatActivity() {
         viewBinding.btnToggleBuffer.setImageResource(R.drawable.ic_shutter_buffer)
         viewBinding.btnSaveHighlight.isEnabled = false
         viewBinding.btnSaveHighlight.alpha = 0.3f
-        viewBinding.textBufferTime.visibility = View.GONE
-        viewBinding.textBufferInactive.visibility = View.VISIBLE
+        viewBinding.textBufferTime.isVisible = false
+        viewBinding.textBufferInactive.isVisible = true
         handler.removeCallbacks(bufferTimerRunnable)
     }
 
