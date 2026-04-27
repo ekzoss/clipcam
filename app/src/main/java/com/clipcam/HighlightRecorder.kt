@@ -6,7 +6,6 @@ import android.content.Context
 import android.media.*
 import android.net.Uri
 import android.os.Build
-import android.os.SystemClock
 import android.provider.MediaStore
 import android.util.Log
 import android.view.Surface
@@ -47,7 +46,33 @@ class HighlightRecorder(
         val data: ByteArray,
         val info: MediaCodec.BufferInfo,
         val isKeyFrame: Boolean
-    )
+    ) {
+        override fun equals(other: Any?): Boolean {
+            if (this === other) return true
+            if (javaClass != other?.javaClass) return false
+
+            other as EncodedPacket
+
+            if (!data.contentEquals(other.data)) return false
+            if (info.offset != other.info.offset) return false
+            if (info.size != other.info.size) return false
+            if (info.presentationTimeUs != other.info.presentationTimeUs) return false
+            if (info.flags != other.info.flags) return false
+            if (isKeyFrame != other.isKeyFrame) return false
+
+            return true
+        }
+
+        override fun hashCode(): Int {
+            var result = data.contentHashCode()
+            result = 31 * result + info.offset
+            result = 31 * result + info.size
+            result = 31 * result + info.presentationTimeUs.hashCode()
+            result = 31 * result + info.flags
+            result = 31 * result + isKeyFrame.hashCode()
+            return result
+        }
+    }
 
     fun start() {
         if (isRunning.get()) return
@@ -136,7 +161,7 @@ class HighlightRecorder(
         val bufferSize = 8192 // Increased for stereo
         val bufferDurationUs = (bufferSize / 4) * 1_000_000L / sampleRate // 4 bytes per frame (2 channels * 2 bytes)
         val buffer = ByteArray(bufferSize)
-        
+
         while (isRunning.get()) {
             val read = audioRecord?.read(buffer, 0, buffer.size) ?: -1
             if (read > 0) {
@@ -147,10 +172,10 @@ class HighlightRecorder(
                         val inputBuffer = encoder.getInputBuffer(inputBufferId) ?: continue
                         inputBuffer.clear()
                         inputBuffer.put(buffer, 0, read)
-                        
+
                         // Use System.nanoTime() to match the clock MediaCodec uses for surface input.
                         val captureTimeUs = (System.nanoTime() / 1000) - bufferDurationUs - (lagCompensationMs * 1000)
-                        
+
                         encoder.queueInputBuffer(inputBufferId, 0, read, captureTimeUs, 0)
                     }
                 } catch (e: Exception) {
@@ -234,19 +259,32 @@ class HighlightRecorder(
     }
 
     fun saveHighlight(context: Context, rotationHint: Int, onComplete: (Uri?) -> Unit) {
-        val vSnapshot = videoBuffer.toList()
-        val aSnapshot = audioBuffer.toList()
         val vFormat = videoFormat
         val aFormat = audioFormat
 
-        if (vSnapshot.isEmpty() || vFormat == null) {
-            Log.e(TAG, "Cannot save: vSnapshot empty or vFormat null")
+        if (vFormat == null) {
+            Log.e(TAG, "Cannot save: vFormat null")
             onComplete(null)
             return
         }
 
+        // Capture the end timestamp before waiting so we know exactly where to stop
+        val endTimeUs = videoBuffer.lastOrNull()?.info?.presentationTimeUs ?: 0L
+
         Thread {
             try {
+                // Wait for the audio pipeline to catch up (audio lag + encoding delay)
+                Thread.sleep(lagCompensationMs + 100)
+
+                val vSnapshot = videoBuffer.toList()
+                val aSnapshot = audioBuffer.toList()
+
+                if (vSnapshot.isEmpty()) {
+                    Log.e(TAG, "Cannot save: vSnapshot empty after wait")
+                    onComplete(null)
+                    return@Thread
+                }
+
                 val timeStamp = SimpleDateFormat("yyyyMMdd_HHmmssSSS", Locale.US).format(Date())
                 val tempFile = File(context.cacheDir, "HL_$timeStamp.mp4")
                 val muxer = MediaMuxer(tempFile.absolutePath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
@@ -258,7 +296,7 @@ class HighlightRecorder(
                 muxer.start()
 
                 val targetDurationUs = bufferDurationSec * 1_000_000L
-                val lastVPts = vSnapshot.last().info.presentationTimeUs
+                val lastVPts = if (endTimeUs > 0) endTimeUs else vSnapshot.last().info.presentationTimeUs
                 val targetStartPts = lastVPts - targetDurationUs
 
                 var firstVIdx = vSnapshot.indexOfFirst { it.isKeyFrame && it.info.presentationTimeUs >= targetStartPts }
@@ -271,9 +309,11 @@ class HighlightRecorder(
                     val maxASize = if (aSnapshot.isNotEmpty()) aSnapshot.maxOf { it.data.size } else 0
                     val buffer = ByteBuffer.allocate(maxOf(maxVSize, maxASize))
                     
-                    // Write Video
+                    // Write Video - up to lastVPts
                     for (i in firstVIdx until vSnapshot.size) {
                         val p = vSnapshot[i]
+                        if (p.info.presentationTimeUs > lastVPts) continue
+
                         buffer.clear()
                         buffer.put(p.data)
                         buffer.flip()
@@ -282,9 +322,9 @@ class HighlightRecorder(
                         muxer.writeSampleData(vTrack, buffer, info)
                     }
                     
-                    // Write Audio - use the same basePts for absolute sync
+                    // Write Audio - up to lastVPts, using the same basePts for absolute sync
                     if (aTrack != -1) {
-                        aSnapshot.filter { it.info.presentationTimeUs >= basePts }.forEach { p ->
+                        aSnapshot.filter { it.info.presentationTimeUs in basePts..lastVPts }.forEach { p ->
                             buffer.clear()
                             buffer.put(p.data)
                             buffer.flip()
